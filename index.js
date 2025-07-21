@@ -11,7 +11,7 @@ prerender.set("prerenderToken", process.env.PRERENDER_TOKEN);
 app.use(prerender);
 
 // Replace with your real frontend URL (hosted on Render)
-const frontendUrl = "https://your-frontend-app.onrender.com";
+const frontendUrl = "https://http://riffcrusher.com/";
 
 app.use(
   "/",
