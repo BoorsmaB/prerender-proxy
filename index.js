@@ -1,6 +1,8 @@
 const express = require("express");
 const prerender = require("prerender-node");
-const { createProxyMiddleware } = require("http-proxy-middleware");
+const http = require("http");
+const https = require("https");
+const { URL } = require("url");
 require("dotenv").config();
 
 const app = express();
@@ -30,7 +32,56 @@ app.use((req, res, next) => {
   next();
 });
 
-// Test route for Prerender verification
+// Test route for Prerender verification - serve a simple page for root URL when it's a verification
+app.get("/", (req, res, next) => {
+  const userAgent = req.get("User-Agent") || "";
+  const isBot =
+    userAgent.includes("Prerender") ||
+    userAgent.includes("bot") ||
+    userAgent.includes("crawler") ||
+    userAgent.includes("spider") ||
+    req.query._escaped_fragment_ !== undefined;
+
+  // If this is a verification request (simple bot check), serve a test page
+  if (
+    isBot &&
+    (userAgent.includes("Prerender") ||
+      req.query._escaped_fragment_ !== undefined)
+  ) {
+    console.log("📋 Serving verification page for Prerender.io");
+    return res.send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <title>RiffCrusher - Guitar Tab Management</title>
+        <meta name="description" content="Professional guitar tab management and sharing platform for musicians">
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta property="og:title" content="RiffCrusher - Guitar Tab Management">
+        <meta property="og:description" content="Professional guitar tab management and sharing platform for musicians">
+        <meta property="og:type" content="website">
+      </head>
+      <body>
+        <div id="root">
+          <h1>🎸 RiffCrusher</h1>
+          <p>Professional guitar tab management and sharing platform for musicians.</p>
+          <p>Prerender integration active - timestamp: ${new Date().toISOString()}</p>
+          <nav>
+            <a href="/tabs">Browse Tabs</a>
+            <a href="/learn">Learn Guitar</a>
+            <a href="/community">Community</a>
+          </nav>
+        </div>
+      </body>
+      </html>
+    `);
+  }
+
+  // Otherwise, continue to proxy
+  next();
+});
+
+// Test route for debugging
 app.get("/prerender-test", (req, res) => {
   console.log("📋 Serving prerender test page");
   res.send(`
@@ -88,6 +139,22 @@ app.use((req, res, next) => {
     return next();
   }
 
+  // Skip prerender for root URL if it's not a bot (let it go to our custom handler)
+  if (req.url === "/") {
+    const userAgent = req.get("User-Agent") || "";
+    const isBot =
+      userAgent.includes("Prerender") ||
+      userAgent.includes("bot") ||
+      userAgent.includes("crawler") ||
+      userAgent.includes("spider") ||
+      req.query._escaped_fragment_ !== undefined;
+
+    if (!isBot) {
+      console.log(`⏭️  Skipping prerender for regular user on root URL`);
+      return next();
+    }
+  }
+
   const userAgent = req.get("User-Agent") || "";
   const isBot =
     userAgent.includes("Prerender") ||
@@ -104,73 +171,90 @@ app.use((req, res, next) => {
 });
 
 const frontendUrl = "https://riffcrusher.com";
+const targetUrl = new URL(frontendUrl);
 
-// Proxy middleware to forward requests to your React app
-app.use(
-  "/",
-  createProxyMiddleware({
-    target: frontendUrl,
-    changeOrigin: true,
-    secure: true,
-    followRedirects: true,
-    onProxyReq: (proxyReq, req, res) => {
-      console.log(`📡 Proxying to: ${frontendUrl}${req.url}`);
+// Custom proxy function to avoid http-proxy-middleware issues
+function proxyRequest(req, res) {
+  console.log(`📡 Proxying to: ${frontendUrl}${req.url}`);
 
-      // Ensure proper headers are forwarded
-      proxyReq.setHeader(
-        "Accept",
-        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-      );
-
-      // Forward original host and protocol info
-      proxyReq.setHeader("X-Forwarded-Host", req.get("host"));
-      proxyReq.setHeader("X-Forwarded-Proto", req.protocol);
+  const options = {
+    hostname: targetUrl.hostname,
+    port: targetUrl.port || (targetUrl.protocol === "https:" ? 443 : 80),
+    path: req.url,
+    method: req.method,
+    headers: {
+      ...req.headers,
+      host: targetUrl.hostname,
+      "x-forwarded-host": req.get("host"),
+      "x-forwarded-proto": req.protocol || "https",
     },
-    onProxyRes: (proxyRes, req, res) => {
-      console.log(
-        `📨 Response from target: ${proxyRes.statusCode} for ${req.url}`
-      );
+  };
 
-      // Ensure HTML content type for HTML responses
+  const client = targetUrl.protocol === "https:" ? https : http;
+
+  const proxyReq = client.request(options, (proxyRes) => {
+    console.log(
+      `📨 Response from target: ${proxyRes.statusCode} for ${req.url}`
+    );
+
+    // Set response headers
+    Object.keys(proxyRes.headers).forEach((key) => {
+      res.setHeader(key, proxyRes.headers[key]);
+    });
+
+    // Ensure HTML content type for HTML responses
+    if (
+      req.url === "/" ||
+      (!req.url.includes(".") && !req.url.startsWith("/api/"))
+    ) {
       if (
-        req.url === "/" ||
-        (!req.url.includes(".") && !req.url.startsWith("/api/"))
+        !proxyRes.headers["content-type"] ||
+        proxyRes.headers["content-type"].includes("text/html")
       ) {
-        if (
-          !proxyRes.headers["content-type"] ||
-          proxyRes.headers["content-type"].includes("text/html")
-        ) {
-          proxyRes.headers["content-type"] = "text/html; charset=utf-8";
-        }
+        res.setHeader("content-type", "text/html; charset=utf-8");
       }
+    }
 
-      // Add cache control headers
-      proxyRes.headers["cache-control"] =
-        "no-store, no-cache, must-revalidate, proxy-revalidate";
-      proxyRes.headers["expires"] = "0";
-      proxyRes.headers["pragma"] = "no-cache";
+    // Add cache control headers
+    res.setHeader(
+      "cache-control",
+      "no-store, no-cache, must-revalidate, proxy-revalidate"
+    );
+    res.setHeader("expires", "0");
+    res.setHeader("pragma", "no-cache");
 
-      // Add CORS headers if needed
-      proxyRes.headers["Access-Control-Allow-Origin"] = "*";
-      proxyRes.headers["Access-Control-Allow-Methods"] =
-        "GET, POST, PUT, DELETE, OPTIONS";
-      proxyRes.headers["Access-Control-Allow-Headers"] =
-        "Content-Type, Authorization";
-    },
-    onError: (err, req, res) => {
-      console.error(`❌ Proxy error for ${req.url}:`, err.message);
+    // Set status code
+    res.statusCode = proxyRes.statusCode;
 
-      if (!res.headersSent) {
-        res.status(502).json({
-          error: "Bad Gateway: Proxy error",
-          message: err.message,
-          url: req.url,
-          timestamp: new Date().toISOString(),
-        });
-      }
-    },
-  })
-);
+    // Pipe the response
+    proxyRes.pipe(res);
+  });
+
+  proxyReq.on("error", (err) => {
+    console.error(`❌ Proxy error for ${req.url}:`, err.message);
+
+    if (!res.headersSent) {
+      res.status(502).json({
+        error: "Bad Gateway: Proxy error",
+        message: err.message,
+        url: req.url,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  });
+
+  // Forward request body for POST/PUT requests
+  if (req.method === "POST" || req.method === "PUT") {
+    req.pipe(proxyReq);
+  } else {
+    proxyReq.end();
+  }
+}
+
+// Catch all route for proxying
+app.use("*", (req, res) => {
+  proxyRequest(req, res);
+});
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -183,16 +267,6 @@ app.use((err, req, res, next) => {
       timestamp: new Date().toISOString(),
     });
   }
-});
-
-// 404 handler
-app.use("*", (req, res) => {
-  console.log(`❓ 404 - Route not found: ${req.method} ${req.url}`);
-  res.status(404).json({
-    error: "Not Found",
-    url: req.url,
-    timestamp: new Date().toISOString(),
-  });
 });
 
 const PORT = process.env.PORT || 3000;
