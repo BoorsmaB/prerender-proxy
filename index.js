@@ -115,22 +115,37 @@ app.get("/health", (req, res) => {
   });
 });
 
-// Prerender middleware - only for HTML pages
+// Static asset middleware - handle these first
+app.use("/static", (req, res) => {
+  console.log(`📁 Serving static asset: ${req.url}`);
+  proxyRequest(req, res);
+});
+
 app.use((req, res, next) => {
-  // Skip prerender for static assets
+  // Skip prerender for static assets (including those not in /static/)
   if (
     req.url.match(
-      /\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|json|xml|txt)$/
+      /\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|json|xml|txt|map)$/
     )
   ) {
     console.log(`⏭️  Skipping prerender for static asset: ${req.url}`);
-    return next();
+    return proxyRequest(req, res);
   }
 
   // Skip prerender for API routes (if any)
   if (req.url.startsWith("/api/")) {
     console.log(`⏭️  Skipping prerender for API route: ${req.url}`);
-    return next();
+    return proxyRequest(req, res);
+  }
+
+  // Skip prerender for static directories
+  if (
+    req.url.startsWith("/static/") ||
+    req.url.startsWith("/assets/") ||
+    req.url.startsWith("/public/")
+  ) {
+    console.log(`⏭️  Skipping prerender for static directory: ${req.url}`);
+    return proxyRequest(req, res);
   }
 
   // Skip our test routes
@@ -187,8 +202,13 @@ function proxyRequest(req, res) {
       host: targetUrl.hostname,
       "x-forwarded-host": req.get("host"),
       "x-forwarded-proto": req.protocol || "https",
+      accept: req.headers.accept || "*/*",
     },
   };
+
+  // Remove host header to avoid conflicts
+  delete options.headers["host"];
+  options.headers.host = targetUrl.hostname;
 
   const client = targetUrl.protocol === "https:" ? https : http;
 
@@ -197,34 +217,42 @@ function proxyRequest(req, res) {
       `📨 Response from target: ${proxyRes.statusCode} for ${req.url}`
     );
 
-    // Set response headers
+    // Set response status first
+    res.statusCode = proxyRes.statusCode;
+
+    // Forward all headers from the target
     Object.keys(proxyRes.headers).forEach((key) => {
       res.setHeader(key, proxyRes.headers[key]);
     });
 
-    // Ensure HTML content type for HTML responses
-    if (
-      req.url === "/" ||
-      (!req.url.includes(".") && !req.url.startsWith("/api/"))
-    ) {
+    // Don't override content-type for static assets - let the original server handle it
+    const isStaticAsset =
+      req.url.match(
+        /\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|json|xml|txt|map)$/
+      ) || req.url.startsWith("/static/");
+
+    if (!isStaticAsset) {
+      // Only modify headers for non-static content
       if (
-        !proxyRes.headers["content-type"] ||
-        proxyRes.headers["content-type"].includes("text/html")
+        req.url === "/" ||
+        (!req.url.includes(".") && !req.url.startsWith("/api/"))
       ) {
-        res.setHeader("content-type", "text/html; charset=utf-8");
+        if (
+          !proxyRes.headers["content-type"] ||
+          proxyRes.headers["content-type"].includes("text/html")
+        ) {
+          res.setHeader("content-type", "text/html; charset=utf-8");
+        }
       }
+
+      // Add cache control headers only for HTML pages
+      res.setHeader(
+        "cache-control",
+        "no-store, no-cache, must-revalidate, proxy-revalidate"
+      );
+      res.setHeader("expires", "0");
+      res.setHeader("pragma", "no-cache");
     }
-
-    // Add cache control headers
-    res.setHeader(
-      "cache-control",
-      "no-store, no-cache, must-revalidate, proxy-revalidate"
-    );
-    res.setHeader("expires", "0");
-    res.setHeader("pragma", "no-cache");
-
-    // Set status code
-    res.statusCode = proxyRes.statusCode;
 
     // Pipe the response
     proxyRes.pipe(res);
@@ -237,6 +265,19 @@ function proxyRequest(req, res) {
       res.status(502).json({
         error: "Bad Gateway: Proxy error",
         message: err.message,
+        url: req.url,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  });
+
+  // Set timeout for the request
+  proxyReq.setTimeout(30000, () => {
+    console.error(`⏰ Timeout for ${req.url}`);
+    proxyReq.destroy();
+    if (!res.headersSent) {
+      res.status(504).json({
+        error: "Gateway Timeout",
         url: req.url,
         timestamp: new Date().toISOString(),
       });
