@@ -5,13 +5,10 @@ require("dotenv").config();
 
 const app = express();
 
-// Add your prerender token here
 prerender.set("prerenderToken", process.env.PRERENDER_TOKEN);
 
-// Use prerender middleware to serve bots/crawlers prerendered HTML
 app.use(prerender);
 
-// Replace with your real frontend URL (hosted on Render)
 const frontendUrl = "https://riffcrusher.com";
 
 app.use(
@@ -19,10 +16,12 @@ app.use(
   createProxyMiddleware({
     target: frontendUrl,
     changeOrigin: true,
-    onProxyReq: (proxyReq, req, res) => {
-      console.log(
-        `Proxying request: ${req.method} ${req.url} --> ${frontendUrl}${req.url}`
-      );
+    onProxyRes: (proxyRes, req, res) => {
+      // Remove cache headers to prevent 304 from caching proxies
+      proxyRes.headers["cache-control"] =
+        "no-store, no-cache, must-revalidate, proxy-revalidate";
+      proxyRes.headers["expires"] = "0";
+      proxyRes.headers["pragma"] = "no-cache";
     },
     onError: (err, req, res) => {
       console.error("Proxy error:", err.message);
@@ -31,7 +30,6 @@ app.use(
   })
 );
 
-// Use the port from Render's environment or fallback to 3000 locally
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Proxy server running on port ${PORT}`);
