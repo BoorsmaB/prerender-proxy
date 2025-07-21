@@ -7,7 +7,16 @@ const app = express();
 
 prerender.set("prerenderToken", process.env.PRERENDER_TOKEN);
 
-app.use(prerender);
+// Only apply prerender middleware for HTML pages (not for static files)
+app.use((req, res, next) => {
+  // Skip prerender for static assets (like .css, .js, images)
+  if (
+    req.url.match(/\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot)$/)
+  ) {
+    return next();
+  }
+  return prerender(req, res, next);
+});
 
 const frontendUrl = "https://riffcrusher.com";
 
@@ -17,7 +26,7 @@ app.use(
     target: frontendUrl,
     changeOrigin: true,
     onProxyRes: (proxyRes, req, res) => {
-      // Remove cache headers to prevent 304 from caching proxies
+      // Optionally tweak headers if needed
       proxyRes.headers["cache-control"] =
         "no-store, no-cache, must-revalidate, proxy-revalidate";
       proxyRes.headers["expires"] = "0";
